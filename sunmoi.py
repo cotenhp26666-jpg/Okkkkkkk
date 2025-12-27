@@ -81,21 +81,23 @@ SCRIPT_CALL_DIRECT_REMOTE = [
 SCRIPT_SPAM_DIRECT_REMOTE = ["lenhmoi5.py", "lenhmoi.py", "lenhspam1.py", "07.py"]
 SCRIPT_FREE_REMOTE = ["08.py", "06.py"]
 SCRIPT_OKI_DIRECT = ["oki.py"]
+SCRIPT_OKI_DIRECT_REMOTE = ["oki.py"]
+
 SCRIPT_CALL_DIRECT = SCRIPT_CALL_DIRECT_LOCAL + SCRIPT_CALL_DIRECT_REMOTE
 SCRIPT_SPAM_DIRECT = SCRIPT_SPAM_DIRECT_LOCAL + SCRIPT_SPAM_DIRECT_REMOTE
 SCRIPT_FREE = SCRIPT_FREE_LOCAL + SCRIPT_FREE_REMOTE
 SCRIPT_VIP_DIRECT_REMOTE = []
 SCRIPT_SMS_DIRECT_REMOTE = []
 TIMEOUT_MAP = {
-    "full": 1200,  # 20 phút
-    "vip": 180,  # 3 phút
-    "sms": 180,  # 3 phút
-    "spam": 300,  # 5 phút
-    "call": 300,  # 5 phút
-    "free": 100,  # ~1.6 phút
-    "oki": 23400,  # 6.5 giờ (23:30 → 6:00)
-    "tiktok": 3600,  # 60 phút
-    "ngl": 3600,  # 60 phút
+    "full": 1200,
+    "vip": 180,
+    "sms": 180,
+    "spam": 300,
+    "call": 300,
+    "free": 100,
+    "oki": 23400,
+    "tiktok": 3600,
+    "ngl": 3600,
 }
 MA_TOKEN_BOT = os.getenv("BOT_TOKEN", "7945237130:AAFumjQuPd1k_J8VkFz0DsuLpvCW5iB446g")
 ID_ADMIN_MAC_DINH = "5365031415"
@@ -103,9 +105,8 @@ TEN_ADMIN_MAC_DINH = "Super Admin"
 NHOM_CHO_PHEP = [-1002610450062, -1003225919295]
 THU_MUC_DU_LIEU = "./data"
 os.makedirs(THU_MUC_DU_LIEU, exist_ok=True)
-logging.basicConfig(level=logging.CRITICAL, handlers=[])
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-logger.disabled = True
 DUONG_DAN_DB = os.path.join(THU_MUC_DU_LIEU, "bot_data.db")
 USER_PROCESSES = {}
 PROCESS_LOCK = threading.Lock()
@@ -192,7 +193,7 @@ COMMAND_COOLDOWNS = {
         "default": 1200,
     },
 }
-def script_should_run_remote(script_name: str, command_type: str) -> bool:
+def script_should_run_remote(script_name: str, command_type: str = None) -> bool:
     if not REMOTE_VPS_URL:
         return False
     remote_lists = {
@@ -201,12 +202,21 @@ def script_should_run_remote(script_name: str, command_type: str) -> bool:
         "call": SCRIPT_CALL_DIRECT_REMOTE,
         "spam": SCRIPT_SPAM_DIRECT_REMOTE,
         "free": SCRIPT_FREE_REMOTE,
+        "oki": SCRIPT_OKI_DIRECT_REMOTE,
     }
-    remote_scripts = remote_lists.get(command_type, [])
+    if command_type:
+        remote_scripts = remote_lists.get(command_type, [])
+    else:
+        remote_scripts = SCRIPT_OKI_DIRECT_REMOTE
     return script_name in remote_scripts
 async def goi_script_vps_khac(
     command_type: str, phone_numbers: list, user_id: int, script_name: str, **kwargs
 ):
+    """
+    Gọi API trên VPS khác để chạy script.
+    Luôn trả về (bool, dict) với key 'error' khi thất bại.
+    Timeout mặc định 30 giây.
+    """
     if not REMOTE_VPS_URL:
         return False, {"error": "VPS khác chưa được cấu hình"}
     try:
@@ -217,23 +227,31 @@ async def goi_script_vps_khac(
             "script_name": script_name,
             "rounds": kwargs.get("rounds"),
         }
+        timeout_seconds = kwargs.get("timeout", 30)
         async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=10)
+            timeout=aiohttp.ClientTimeout(total=timeout_seconds)
         ) as session:
             async with session.post(
                 f"{REMOTE_VPS_URL}/execute",
                 json=payload,
                 headers={"Authorization": f"Bearer {API_SECRET_KEY}"},
             ) as resp:
+                try:
+                    data = await resp.json()
+                except Exception:
+                    # Nếu response không phải JSON, đọc text để debug
+                    text = await resp.text()
+                    return False, {"error": f"Invalid JSON response: {resp.status} - {text}"}
                 if resp.status == 200:
-                    result = await resp.json()
-                    return result.get("success", False), result.get("data", {})
+                    return data.get("success", False), data.get("data", {})
                 else:
-                    return False, {"error": f"VPS trả về lỗi: {resp.status}"}
+                    return False, {"error": f"VPS trả về lỗi: {resp.status}", "body": data}
     except asyncio.TimeoutError:
         return False, {"error": "Timeout kết nối VPS"}
+    except aiohttp.ClientError as e:
+        return False, {"error": f"HTTP Client error: {str(e)}"}
     except Exception as e:
-        pass
+        return False, {"error": str(e)}
 def get_carrier(phone):
     if not phone:
         return "Không xác định"
@@ -318,6 +336,7 @@ async def execute_with_swap(
         "call": SCRIPT_CALL_DIRECT,
         "spam": SCRIPT_SPAM_DIRECT,
         "free": SCRIPT_FREE,
+        "oki": SCRIPT_OKI_DIRECT,
     }
     scripts = script_mapping.get(command_type)
     if not scripts:
@@ -386,7 +405,7 @@ async def kiem_tra_vip_het_han():
                         )
                         conn.commit()
                         quyen_cache.set(user_id, None)
-                except:
+                except Exception:
                     continue
             conn.close()
         except Exception:
@@ -417,7 +436,7 @@ async def kiem_tra_super_vip_het_han():
                         conn.commit()
                         quyen_cache.set(user_id, None)
                         await thong_bao_het_han_super_vip(user_id)
-                except:
+                except Exception:
                     continue
             conn.close()
         except Exception:
@@ -436,7 +455,7 @@ async def thong_bao_het_han_vip(user_id):
                     parse_mode=ParseMode.HTML,
                 )
                 break
-            except:
+            except Exception:
                 continue
     except Exception:
         pass
@@ -453,12 +472,10 @@ async def thong_bao_het_han_super_vip(user_id):
                     parse_mode=ParseMode.HTML,
                 )
                 break
-            except:
+            except Exception:
                 continue
     except Exception:
         pass
-USER_PROCESSES = {}
-PROCESS_LOCK = threading.Lock()
 def chay_script_don_gian(command, user_id=None, timeout=3600, command_type=None):
     try:
         if not command or not user_id:
@@ -475,10 +492,10 @@ def chay_script_don_gian(command, user_id=None, timeout=3600, command_type=None)
                     try:
                         p.terminate()
                         p.wait(timeout=1)
-                    except:
+                    except Exception:
                         try:
                             p.kill()
-                        except:
+                        except Exception:
                             pass
             USER_PROCESSES[user_id] = alive_procs
             if len(alive_procs) >= 10:
@@ -503,7 +520,7 @@ def chay_script_don_gian(command, user_id=None, timeout=3600, command_type=None)
                     time.sleep(3)
                     if process.poll() is None:
                         process.kill()
-            except:
+            except Exception:
                 pass
         timer_thread = threading.Thread(target=kill_after_timeout, daemon=True)
         timer_thread.start()
@@ -522,7 +539,7 @@ def cleanup_dead_processes():
                         try:
                             p.terminate()
                             p.wait(timeout=1)
-                        except:
+                        except Exception:
                             pass
                 if alive_procs:
                     USER_PROCESSES[user_id] = alive_procs
@@ -563,11 +580,11 @@ def cleanup_dead_processes():
                     should_kill = True
                 elif age_minutes > 30:
                     try:
-                        cpu_percent = proc.cpu_percent(interval=1)
-                        if cpu_percent == 0.0:  # Không sử dụng CPU
+                        cpu_percent = proc.cpu_percent(interval=None)
+                        if cpu_percent == 0.0:
                             should_kill = True
-                    except:
-                        should_kill = True  # Nếu không đọc được CPU thì cũng kill
+                    except Exception:
+                        should_kill = True
                 if should_kill:
                     try:
                         proc.terminate()
@@ -619,17 +636,18 @@ def force_kill_zombies():
                         killed_count += 1
                     except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
                         pass
-            except:
+            except Exception:
                 continue
     except Exception:
         pass
 async def schedule_cleanup():
     while True:
         try:
-            await asyncio.sleep(120)  # 2 phút như VPS2
-            cleanup_dead_processes()
-            force_kill_zombies()
-        except Exception:
+            await asyncio.sleep(600)
+            await asyncio.to_thread(cleanup_dead_processes)
+            await asyncio.to_thread(force_kill_zombies)
+        except Exception as e:
+            logger.error(f"schedule_cleanup error: {e}")
             continue
 def khoi_tao_database():
     try:
@@ -754,7 +772,7 @@ def lay_cap_do_quyen_nguoi_dung(user_id):
                         quyen_cache.set(user_id, "member")
                         asyncio.create_task(thong_bao_het_han_vip(user_id))
                         return "member"
-                except:
+                except Exception:
                     pass
             conn.close()
             quyen_cache.set(user_id, role)
@@ -805,7 +823,7 @@ def lay_thoi_gian_vn():
         mui_gio_vn = pytz.timezone("Asia/Ho_Chi_Minh")
         hien_tai = datetime.now(mui_gio_vn)
         return hien_tai.strftime("%H:%M:%S"), hien_tai.strftime("%d/%m/%Y")
-    except:
+    except Exception:
         hien_tai = datetime.now()
         return hien_tai.strftime("%H:%M:%S"), hien_tai.strftime("%d/%m/%Y")
 def escape_html(text):
@@ -833,7 +851,7 @@ def dinh_dang_lien_ket_nguoi_dung(user):
             return f'<a href="tg://user?id={user_id}">{escape_html(ten_day_du)}</a>'
         else:
             return f'<a href="tg://user?id={user_id}">ID: {user_id}</a>'
-    except:
+    except Exception:
         return "Người dùng không rõ"
 def lay_tieu_de_quyen(user_id):
     cap_do = lay_cap_do_quyen_nguoi_dung(user_id)
@@ -893,8 +911,8 @@ def cooldown_decorator(func):
             chuoi_gio, chuoi_ngay = lay_thoi_gian_vn()
             await gui_phan_hoi(
                 message,
-                f"{tieu_de}     :        {lien_ket_nguoi_dung}\n"
-                f"🕐 𝐶𝑜̀𝑛 𝑙𝑎̣𝑖        :        {time_str}\n"
+                f"{tieu_de}         :        {lien_ket_nguoi_dung}\n"
+                f"🕐 𝐶𝑜̀𝑛 𝑙𝑎̣𝑖          :          {time_str}\n"
                 f"🎯 𝑉𝑢̛̀𝑎 𝑙𝑜̀𝑛𝑔 𝑐ℎ𝑜̛̀ 𝑑𝑒̂̉ 𝑠𝑢̛̉ 𝑑𝑢̣𝑛𝑔 𝑙𝑒̣̂𝑛ℎ 𝑛𝑎̀𝑦 𝑡𝑖𝑒̂́𝑝 !",
                 xoa_tin_nguoi_dung=True,
                 tu_dong_xoa_sau_giay=10,
@@ -955,7 +973,7 @@ def chi_vip_vinh_vien(func):
             await gui_phan_hoi(
                 message,
                 f"{tieu_de}         :         {lien_ket_nguoi_dung}\n"
-                f"🆔 𝑀ã 𝐼𝐷          :        {user_id}\n"
+                f"🆔 𝑀ã 𝐼𝐷          :          {user_id}\n"
                 f"🙅🏼 𝐿𝑒̣̂𝑛ℎ 𝑛𝑎̀𝑦 𝑐ℎ𝑖̉ 𝑑𝑎̀𝑛ℎ 𝑐ℎ𝑜 𝑉𝐼𝑃 !\n\n"
                 f"🎯 𝐶𝑎́𝑐ℎ 𝑙𝑒̂𝑛 𝑉𝐼𝑃 𝑀𝐼𝐸̂̃𝑁 𝑃𝐻𝐼́ :\n\n"
                 f"1️⃣ 𝐶ℎ𝑖𝑎 𝑠𝑒̉ 𝑙𝑖𝑛𝑘 𝑐𝑢̉𝑎 𝑏𝑎̣𝑛 : \n{ref_link}\n\n"
@@ -1005,8 +1023,8 @@ def chi_admin_hoac_super_vip(func):
             chuoi_gio, chuoi_ngay = lay_thoi_gian_vn()
             await gui_phan_hoi(
                 message,
-                f" {tieu_de}        :          {lien_ket_nguoi_dung}\n"
-                f"🆔 𝑀ã 𝐼𝐷          :          {user_id}\n"
+                f" {tieu_de}        :           {lien_ket_nguoi_dung}\n"
+                f"🆔 𝑀ã 𝐼𝐷          :            {user_id}\n"
                 f"🙅🏼 𝐿𝑒̣̂𝑛ℎ 𝑛𝑎̀𝑦 𝑐ℎ𝑖̉ 𝑑𝑎̀𝑛ℎ 𝑐ℎ𝑜 𝐴𝑑𝑚𝑖𝑛 và 𝑆𝑈𝑃𝐸𝑅 𝑉𝐼𝑃 !",
                 xoa_tin_nguoi_dung=True,
                 tu_dong_xoa_sau_giay=10,
@@ -1028,7 +1046,7 @@ async def xu_ly_addphone(message: Message):
         await gui_phan_hoi(
             message,
             f"🚧 𝐶𝑎́𝑐 𝑠𝑜̂́ 𝑐𝑢̉𝑎 𝑏𝑎̣𝑛 𝑑𝑎𝑛𝑔 𝑡𝑟𝑜𝑛𝑔 𝑞𝑢𝑎́ 𝑡𝑟𝑖̀𝑛ℎ 𝑐ℎ𝑎̣𝑦.\n\n"
-            f"🙅🏼{lien_ket_nguoi_dung} 𝑉𝑢𝑖 𝑙𝑜̀𝑛𝑔 𝑞𝑢𝑎𝑦 𝑙𝑎̣𝑖 𝑣𝑎̀𝑜 𝟼ℎ𝟹𝟶 𝑑𝑒̂̉ 𝑐𝑎̣̂𝑝 𝑛ℎ𝑎̣̂𝑡 𝑙𝑎̣𝑖 𝑑𝑎𝑛ℎ 𝑠𝑎́𝑐ℎ !",
+            f"🙅🏼{lien_ket_nguoi_dung} 𝑉𝑢𝑖 𝑙𝑜̀𝑛𝑔 𝑞𝑢𝑎𝑦 𝑙𝑎̣𝑖 𝑣𝑎̀𝑜 𝟼ℎ𝟹𝟶 𝑑𝑒̂̉ 𝑐𝑎̣̂𝑝 𝑛ℎ𝑎̣̂𝑡 𝑙𝑎̣𝑖",
             xoa_tin_nguoi_dung=True,
             tu_dong_xoa_sau_giay=10,
         )
@@ -1038,7 +1056,7 @@ async def xu_ly_addphone(message: Message):
     if not cac_tham_so:
         await gui_phan_hoi(
             message,
-            "🫡 𝐶𝑢́ 𝑝ℎ𝑎́𝑝: /tso 𝟶𝟿𝟾𝟿𝟸𝟿𝟿𝟿𝟿𝟶, 𝑇𝑜̂́𝑖 𝑑𝑎 𝟹 𝑠𝑜̂́ 𝑐ℎ𝑜 𝑚𝑜̂̃𝑖 𝑆𝑢𝑝𝑒𝑟",
+            "🫡 𝐶𝑢́ 𝑝ℎ𝑎́𝑝: /tso 𝟶𝟿𝟷𝟸𝟻𝟼𝟽𝟾𝟿𝟶. 𝑇𝑜̂́𝑖 𝑑𝑎 𝟹 𝑠𝑜̂́ 𝑐ℎ𝑜 𝑚𝑜̂̃𝑖 𝑆𝑢𝑝𝑒𝑟",
             xoa_tin_nguoi_dung=True,
             tu_dong_xoa_sau_giay=False,
         )
@@ -1102,7 +1120,7 @@ async def xu_ly_delphone(message: Message):
         await gui_phan_hoi(
             message,
             f"🚧 𝐶𝑎́𝑐 𝑠𝑜̂́ 𝑐𝑢̉𝑎 𝑏𝑎̣𝑛 𝑑𝑎𝑛𝑔 𝑡𝑟𝑜𝑛𝑔 𝑞𝑢𝑎́ 𝑡𝑟𝑖̀𝑛ℎ 𝑐ℎ𝑎̣𝑦.\n\n"
-            f"🙅🏼{lien_ket_nguoi_dung} 𝑉𝑢𝑖 𝑙𝑜̀𝑛𝑔 𝑞𝑢𝑎𝑦 𝑙𝑎̣𝑖 𝑣𝑎̀𝑜 𝟼ℎ𝟹𝟶 𝑑𝑒̂̉ 𝑐𝑎̣̂𝑝 𝑛ℎ𝑎̣̂𝑡 𝑙𝑎̣𝑖 𝑑𝑎𝑛ℎ 𝑠𝑎́𝑐ℎ !",
+            f"🙅🏼{lien_ket_nguoi_dung} 𝑉𝑢𝑖 𝑙𝑜̀𝑛𝑔 𝑞𝑢𝑎𝑦 𝑙𝑎̣𝑖 𝑣𝑎̀𝑜 𝟼ℎ𝟹𝟶 𝑑𝑒̂̉ 𝑐𝑎̣̂𝑝 𝑛ℎ𝑎̣̂𝑡",
             xoa_tin_nguoi_dung=True,
             tu_dong_xoa_sau_giay=10,
         )
@@ -1112,7 +1130,7 @@ async def xu_ly_delphone(message: Message):
     if not cac_tham_so:
         await gui_phan_hoi(
             message,
-            "🫡 𝐶𝑢́ 𝑝ℎ𝑎́𝑝: /𝑑𝑒𝑙𝑠𝑜 𝟶𝟿𝟾𝟿𝟸𝟿𝟿𝟿𝟿𝟶",
+            "🫡 𝐶𝑢́ 𝑝ℎ𝑎́𝑝: /𝑑𝑒𝑙𝑠𝑜 𝟶𝟿𝟾𝟾𝟽𝟽𝟾𝟿𝟿𝟶",
             xoa_tin_nguoi_dung=True,
             tu_dong_xoa_sau_giay=False,
         )
@@ -1171,7 +1189,7 @@ async def xu_ly_sper(message: Message):
         # Tạo nội dung hiển thị
         status_msg = ""
         if dang_chay:
-            status_msg = "\n🚧 𝑇𝑟𝑢̛𝑜̛𝑛𝑔 𝑡𝑟𝑖̀𝑛ℎ 𝑑𝑎𝑛𝑔 𝑐ℎ𝑎̣𝑦, 𝑘ℎ𝑜̂𝑛𝑔 𝑡ℎ𝑒̂̉ 𝑡ℎ𝑒̂𝑚 𝑑𝑢̛𝑜̛̣𝑐 𝑠𝑜̂́ 𝑣𝑎̀𝑜 𝑙𝑢́𝑐 𝑛𝑎̀𝑦 !"
+            status_msg = "\n🚧 𝑇𝑟𝑢̛𝑜̛𝑛𝑔 𝑡𝑟𝑖̀𝑛ℎ 𝑑𝑎𝑛𝑔 𝑐ℎ𝑎̣𝑦, 𝑘ℎ𝑜̂𝑛𝑔 𝑡ℎ𝑒̂̉  𝑑𝑢̛𝑜̛̣𝑐 𝑠𝑜̂́ 𝑑𝑖𝑒̣̂𝑛 𝑡ℎ𝑜𝑎̣𝑖"
 
         noi_dung = f"""{tieu_de}        :        {lien_ket_nguoi_dung}
 🆔 𝑀ã 𝐼𝐷        :         {user_id}{status_msg}
@@ -1180,8 +1198,8 @@ async def xu_ly_sper(message: Message):
 
         if not dang_chay:
             noi_dung += """
- • /tso [số]    -    𝑇ℎ𝑒̂𝑚 𝑠𝑜̂́ 𝑚𝑜̛́𝑖
- • /delso [số]  -    𝑋𝑜́𝑎 𝑠𝑜̂́ 𝑘ℎ𝑜̉𝑖 𝑑𝑎𝑛ℎ 𝑠𝑎́𝑐ℎ"""
+ • /tso     -    𝑇ℎ𝑒̂𝑚 𝑠𝑜̂́ 𝑚𝑜̛́𝑖
+ • /delso    -    𝑋𝑜́𝑎 𝑠𝑜̂́ 𝑘ℎ𝑜̉𝑖 𝑑𝑎𝑛ℎ 𝑠𝑎́𝑐ℎ"""
 
         noi_dung += f"""
 
@@ -1194,9 +1212,9 @@ async def xu_ly_sper(message: Message):
                 noi_dung += f"  {i}. 📞 {phone['phone_number']} - {carrier}\n"
 
             if dang_chay:
-                noi_dung += f"\n🛸 𝐷𝑎𝑛ℎ 𝑠𝑎́𝑐ℎ 𝑐𝑎́𝑐 𝑠𝑜̂́ 𝑑𝑎𝑛𝑔 𝑐ℎ𝑎̣𝑦 𝑡𝑢̛̣ 𝑑𝑜̣̂𝑛𝑔 𝟸𝟹:𝟹𝟶-𝟶𝟼:𝟶𝟶"
+                noi_dung += f"\n🛸 𝐷𝑎𝑛ℎ 𝑠𝑎́𝑐ℎ 𝑐𝑎́𝑐 𝑠𝑜̂́ 𝑑𝑎𝑛𝑔 𝑐ℎ𝑎̣𝑦 𝑡𝑢̛̣ 𝑑𝑜̣̂𝑛𝑔 𝟸𝟹:𝟹𝟶-𝟶𝟼:𝟹𝟶 "
             else:
-                noi_dung += f"\n 𝐿𝑒̂𝑛 𝑙𝑖̣𝑐ℎ 𝑐ℎ𝑎̣𝑦 𝑡𝑢̛̣ 𝑑𝑜̣̂𝑛𝑔 ℎ𝑎̀𝑛𝑔 𝑑𝑒̂𝑚 𝑣𝑎̀𝑜 𝑙𝑢́𝑐 𝟸𝟹ℎ:𝟹𝟶𝑝"
+                noi_dung += f"\n 𝐿𝑒̂𝑛 𝑙𝑖̣𝑐ℎ 𝑐ℎ𝑎̣𝑦 𝑡𝑢̛̣ 𝑑𝑜̣̂𝑛𝑔 ℎ𝑎̀𝑛𝑔 𝑑𝑒̂𝑚 𝑣𝑎̀𝑜 𝑙𝑢́𝑐 𝟸𝟹ℎ𝟹𝟶"
         else:
             noi_dung += "\n\n 𝐵𝑎̣𝑛 𝑐ℎ𝑢̛𝑎 𝑐𝑜́ 𝑠𝑜̂́ 𝑛𝑎̀𝑜 𝑡𝑟𝑜𝑛𝑔 𝑑𝑎𝑛ℎ 𝑠𝑎́𝑐ℎ"
             if not dang_chay:
@@ -1229,32 +1247,48 @@ async def xu_ly_oki_schedule():
     try:
         with OKI_LOCK:
             OKI_RUNNING = True
-        results = _lay_super_vip_phones()
-        if not results:
+        logger.info("[OKI_SCHEDULE] Starting...")
+        await _gui_thong_bao_oki_bat_dau_len_nhom()
+        conn = tao_ket_noi_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, phone_number FROM super_vip_phones")
+        rows = cursor.fetchall()
+        conn.close()
+        if not rows:
             with OKI_LOCK:
                 OKI_RUNNING = False
+            await _gui_thong_bao_oki_hoan_thanh_len_nhom(0)
+            logger.info("[OKI_SCHEDULE] No phones found")
             return
-        await _gui_thong_bao_oki_bat_dau_len_nhom()
-        for row in results:
-            user_id = row["user_id"]
+        scheduled = 0
+        for row in rows:
             try:
-                await _thuc_thi_oki_scripts_via_fla(user_id)
-                await asyncio.sleep(2)
-            except Exception:
-                pass
-
-        # Không thông báo hoàn thành ở đây - để job 6:00 làm
-        # OKI_RUNNING vẫn = True để block việc thêm/xóa số
-        # Job 6:00 sẽ cleanup và set OKI_RUNNING = False</old_str>
-    except Exception:
+                user_id = row["user_id"]
+                phone = row["phone_number"]
+                asyncio.create_task(
+                    goi_script_vps_khac(
+                        "oki",
+                        [phone],
+                        user_id,
+                        "oki.py",
+                        rounds=999,
+                        timeout=30,
+                    )
+                )
+                scheduled += 1
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                logger.error(f"[OKI_SCHEDULE] Error scheduling {phone}: {e}")
+                continue
+        logger.info(f"[OKI_SCHEDULE] Scheduled {scheduled} tasks")
+    except Exception as e:
+        logger.exception(f"[OKI_SCHEDULE] Fatal error: {e}")
         with OKI_LOCK:
             OKI_RUNNING = False
 async def _gui_thong_bao_oki_bat_dau_len_nhom():
     try:
-        # Lấy thời gian hiện tại
         chuoi_gio, chuoi_ngay = lay_thoi_gian_vn()
 
-        # Đếm tổng số điện thoại
         results = _lay_super_vip_phones()
         phone_count = sum(row["count"] for row in results) if results else 0
 
@@ -1263,7 +1297,7 @@ async def _gui_thong_bao_oki_bat_dau_len_nhom():
             f"📜 𝑇𝑜̂̉𝑛𝑔 𝑠𝑜̂́         :          {phone_count}\n\n"            
             f"🕐 𝑇ℎ𝑜̛̀𝑖 𝑔𝑖𝑎𝑛        :         {chuoi_gio}\n"
             f"📅 𝑁𝑔𝑎̀𝑦           :           {chuoi_ngay}\n\n"
-            f"🚀 𝐶𝑎́𝑐 𝑠𝑜̂́ 𝑠𝑒̃ 𝑘ℎ𝑜̂𝑛𝑔 𝑡ℎ𝑒̂̉ 𝑡ℎ𝑎𝑦 𝑑𝑜̂̉𝑖 𝑐ℎ𝑜 𝑑𝑒̂́𝑛 𝑘ℎ𝑖 𝑞𝑢𝑎́ 𝑡𝑟𝑖̀𝑛ℎ ℎ𝑜𝑎̀𝑛 𝑡𝑎̂́𝑡 𝑣𝑎̀𝑜 𝟼ℎ𝟹𝟶 !</blockquote>"
+            f"🚀 𝐶𝑎́𝑐 𝑠𝑜̂́ 𝑠𝑒̃ 𝑘ℎ𝑜̂𝑛𝑔 𝑡ℎ𝑒̂̉ 𝑡ℎ𝑎𝑦 𝑑𝑜̂̉𝑖 𝑐ℎ𝑜 𝑑𝑒̂́𝑛 𝑘ℎ𝑖 𝑞𝑢𝑎́ ℎ𝑜𝑎̀𝑛 𝑡𝑎̂́𝑡"
         )
         for group_id in NHOM_CHO_PHEP:
             try:
@@ -1273,7 +1307,7 @@ async def _gui_thong_bao_oki_bat_dau_len_nhom():
                     parse_mode=ParseMode.HTML,
                 )
                 break
-            except:
+            except Exception:
                 continue
     except Exception:
         pass
@@ -1315,52 +1349,83 @@ async def _thuc_thi_oki_scripts_via_fla(user_id):
                     else:
                         return False, f"HTTP Error: {resp.status}"
         except asyncio.TimeoutError:
-            return False, "Timeout connecting to API"
-        except Exception as e:
-            return False, f"Request failed: {str(e)}"
-    except Exception as e:
-        return False, f"Database error: {str(e)}"
-async def xu_ly_oki_cleanup_6h():
-    """Job chạy lúc 6:00 sáng để cleanup tất cả OKI processes và thông báo"""
-    global OKI_RUNNING
-    try:
-        with OKI_LOCK:
-            OKI_RUNNING = False
-
-        # Force kill tất cả oki.py processes
-        killed_count = 0
-        try:
-            import psutil
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-                try:
-                    if "python" not in proc.info["name"].lower():
-                        continue
-                    cmdline = proc.info.get("cmdline", [])
-                    if len(cmdline) < 2:
-                        continue
-                    script_name = os.path.basename(cmdline[1]) if cmdline[1] else ""
-                    if script_name == "oki.py":
-                        try:
-                            proc.kill()
-                            proc.wait(timeout=3)
-                            killed_count += 1
-                        except:
-                            pass
-                except:
-                    continue
-        except:
             pass
+        except aiohttp.ClientError as e:
+            pass
+        except Exception as e:
+            pass
+    except Exception as e:
+        pass
+async def xu_ly_oki_cleanup_6h():
+    global OKI_RUNNING
+    killed_count = 0
+    try:
+        logger.info("[OKI_CLEANUP] Starting cleanup...")
+        if REMOTE_VPS_URL:
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+                    async with session.post(
+                        f"{REMOTE_VPS_URL}/stop_oki",
+                        json={"reason": "scheduled_cleanup"},
+                        headers={"Authorization": f"Bearer {API_SECRET_KEY}"},
+                    ) as resp:
+                        if resp.status == 200:
+                            try:
+                                data = await resp.json()
+                                logger.info(f"[OKI_CLEANUP] Remote stop response: {data}")
+                            except Exception:
+                                txt = await resp.text()
+                                logger.debug(f"[OKI_CLEANUP] Remote response text: {txt}")
+                        else:
+                            logger.warning(f"[OKI_CLEANUP] Remote returned {resp.status}")
+            except asyncio.TimeoutError:
+                logger.warning("[OKI_CLEANUP] Remote timeout")
+            except Exception as e:
+                logger.error(f"[OKI_CLEANUP] Remote error: {e}")
 
-        # Cleanup USER_PROCESSES
+        def _kill_local_oki():
+            count = 0
+            try:
+                for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                    try:
+                        if "python" not in (proc.info.get("name") or "").lower():
+                            continue
+                        cmdline = proc.info.get("cmdline", [])
+                        if len(cmdline) < 2:
+                            continue
+                        script_name = os.path.basename(cmdline[1]) if cmdline[1] else ""
+                        if script_name == "oki.py":
+                            try:
+                                proc.kill()
+                                proc.wait(timeout=3)
+                                count += 1
+                            except Exception:
+                                try:
+                                    os.kill(proc.pid, 9)
+                                    count += 1
+                                except Exception as e:
+                                    logger.debug(f"Failed to kill local oki: {e}")
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+            except Exception as e:
+                logger.error(f"[OKI_CLEANUP] Local kill error: {e}")
+            return count
+
+        killed_count = await asyncio.to_thread(_kill_local_oki)
+        logger.info(f"[OKI_CLEANUP] Killed {killed_count} local processes")
+
         with PROCESS_LOCK:
             USER_PROCESSES.clear()
 
-        # Thông báo hoàn thành
+        with OKI_LOCK:
+            OKI_RUNNING = False
+
         await _gui_thong_bao_oki_hoan_thanh_len_nhom(killed_count)
-
-    except Exception:
-        pass
-
+        logger.info("[OKI_CLEANUP] Completed")
+    except Exception as e:
+        logger.exception(f"[OKI_CLEANUP_FATAL] {e}")
+        with OKI_LOCK:
+            OKI_RUNNING = False
 async def _gui_thong_bao_oki_hoan_thanh_len_nhom(killed_count=0):
     try:
         chuoi_gio, chuoi_ngay = lay_thoi_gian_vn()
@@ -1378,7 +1443,7 @@ async def _gui_thong_bao_oki_hoan_thanh_len_nhom(killed_count=0):
                     parse_mode=ParseMode.HTML,
                 )
                 break
-            except:
+            except Exception:
                 continue
     except Exception:
         pass
@@ -1392,7 +1457,7 @@ async def gui_thong_bao_len_nhom(noi_dung: str):
                     parse_mode=ParseMode.HTML,
                 )
                 break
-            except:
+            except Exception:
                 continue
     except Exception:
         pass
@@ -1403,7 +1468,7 @@ async def chay_script_async(cmd, user_id):
             cmd, user_id, timeout=3600, command_type="full"
         )
         return success
-    except:
+    except Exception:
         return False
 async def gui_phan_hoi(
     message: Message,
@@ -1428,7 +1493,6 @@ async def gui_phan_hoi(
             ))
             sent_message = None
         else:
-            #  KHÔNG ẢNH → GIỮ NGUYÊN LOGIC CŨ CỦA MÀY
             text = f"<blockquote>{noi_dung.strip()}</blockquote>"
             asyncio.create_task(bot.send_message(
                 chat_id=chat_id,
@@ -1440,7 +1504,7 @@ async def gui_phan_hoi(
         if xoa_tin_nguoi_dung:
             try:
                 await bot.delete_message(chat_id, message.message_id)
-            except:
+            except Exception:
                 pass
         if tu_dong_xoa_sau_giay > 0 and not luu_vinh_vien:
             asyncio.create_task(
@@ -1458,7 +1522,7 @@ async def tu_dong_xoa_tin_nhan(chat_id, message_id, tre=10):
     try:
         await asyncio.sleep(tre)
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except:
+    except Exception:
         pass
 def them_vip(user_id, ten, admin_added_by=None):
     try:
@@ -1585,7 +1649,7 @@ async def xu_ly_sta(message: Message):
                                         f"𝐻𝑒̂́𝑡 ℎ𝑎̣𝑛       :      {(datetime.now() + timedelta(days=30)).strftime('%d/%m/%Y')}</blockquote>",
                                         parse_mode=ParseMode.HTML,
                                     )
-                                except:
+                                except Exception:
                                     pass
                     conn.close()
                 except Exception:
@@ -1596,7 +1660,7 @@ async def xu_ly_sta(message: Message):
 
 🚀 𝐿𝐸̣̂𝑁𝐻 𝐶𝑂̛ 𝐵𝐴̉𝑁 :
  • /ping        -      𝑋𝑒𝑚 𝑇𝑟𝑎̣𝑛𝑔 𝑇ℎ𝑎́𝑖
- • /checkid     -      𝑋𝑒𝑚 𝑇ℎ𝑜̂𝑛𝑔 𝑇𝑖𝑛 𝐼𝐷
+ • /checkid     -      𝑋𝑒𝑚 𝑇𝒉𝑜̂𝑛𝑔 𝑇𝑖𝑛 𝐼𝐷
  • /free        -       𝑆𝑝𝑎𝑚 𝑆𝑀𝑆
  • /sms        -      𝑆𝑀𝑆 (2 𝑠𝑜̂́ 𝑀𝑒𝑚𝑏𝑒𝑟, 50 𝑠𝑜̂́ 𝑉𝐼𝑃)
  • /img        -        𝑅𝑎𝑛𝑑𝑜𝑚 𝐴̉𝑛ℎ
@@ -1656,7 +1720,7 @@ async def xu_ly_sms(message: Message):
         gioi_han = 50 if cap_do in ("admin", "vip") else 2
         await gui_phan_hoi(
             message,
-            f"🫡 /sms 𝑇𝑜̂́𝑖 𝑑𝑎 {gioi_han} 𝑠𝑜̂́ 𝑑𝑖𝑒̣̂𝑛 𝑡ℎ𝑜𝑎̣𝑖 𝑐𝑢̀𝑛𝑔 𝑙𝑢́𝑐 𝑡ℎ𝑒𝑜 𝑞𝑢𝑦𝑒̂̀𝑛 ℎ𝑖𝑒̣̂𝑛 𝑡𝑎̣𝑖 𝑐𝑢̉𝑎 𝑏𝑎̣𝑛 !",
+            f"🫡 /sms 𝑇𝑜̂́𝑖 𝑑𝑎 {gioi_han} 𝑠𝑜̂́ 𝑑𝑖𝑒̣̂𝑛 𝑡ℎ𝑜𝑎̣𝑖 𝑐𝑢̀𝑛𝑔 𝑙𝑢́𝑐 𝑡ℎ𝑒𝑜 𝑞𝑢𝑦𝑒̂̀𝑛 ℎ𝑖𝑒̣̂𝑛 𝑡𝑎̣𝑖",
             xoa_tin_nguoi_dung=True,
             tu_dong_xoa_sau_giay=False,
         )
@@ -1740,19 +1804,34 @@ async def xu_ly_spam(message: Message):
             tu_dong_xoa_sau_giay=False,
         )
         return False
-    # GỬI PHẢN HỒI NGAY LẬP TỨC (BACKGROUND)
-    asyncio.create_task(gui_phan_hoi(
-        message,
-        noi_dung,
+    thanh_cong, exec_info = await execute_with_swap(
+        "spam", [so_dien_thoai], user_id, rounds=1
+    )
+    if not thanh_cong:
+        await gui_phan_hoi(
+            message,
+            "🫡 Lỗi khi khởi động tiến trình!",
+            xoa_tin_nguoi_dung=True,
+            tu_dong_xoa_sau_giay=10,
+        )
+        return False
+    tieu_de = lay_tieu_de_quyen(user_id)
+    lien_ket_nguoi_dung = dinh_dang_lien_ket_nguoi_dung(user)
+    noi_dung = (
+        f"{tieu_de}       :        {lien_ket_nguoi_dung}\n"
+        f"🆔 𝑀ã 𝐼𝐷              :       {user_id}\n"
+        f"📲 𝑃ℎ𝑜𝑛𝑒 𝑉𝑁        :        {so_dien_thoai}\n"
+        f"🛰️ 𝑁ℎ𝑎̀ 𝑚𝑎̣𝑛𝑔       :        {get_carrier(so_dien_thoai)}\n"
+        f"🪩 𝑉𝑖̣ 𝑡𝑟𝑖́                :        𝑉/𝑁 𝑂𝑛𝑙𝑖𝑛𝑒\n\n"
+        f"🚀 𝐿𝑒̣̂𝑛ℎ ✧𝐒𝐏𝐀𝐌✧ 𝑑𝑎̃ 𝑐ℎ𝑎̣𝑦 𝑡ℎ𝑎̀𝑛ℎ 𝑐𝑜̂𝑛𝑔\n"
+        f" 𝑇𝑎̆𝑛𝑔 𝑡𝑜̂́𝑐 𝑔𝑢̛̉𝑖 𝑡𝑖𝑛 𝑟𝑎́𝑐 𝑙𝑖𝑒̂𝑛 𝑡𝑢̣𝑐 ! 🫡\n"
+    )
+    await gui_phan_hoi(
+        message, noi_dung,
         xoa_tin_nguoi_dung=True,
         luu_vinh_vien=True,
         co_keyboard=True,
-        photo_path="imagehack.jpg",
-    ))
-
-    # SAU ĐÓ MỚI GỌI SCRIPT CHẠY
-    thanh_cong, exec_info = await execute_with_swap(
-        "spam", [so_dien_thoai], user_id, rounds=1
+        photo_path="imagehack.jpg"
     )
     return True
 @cooldown_decorator
@@ -1813,7 +1892,7 @@ async def xu_ly_free(message: Message):
         f"🛰️ 𝑁ℎ𝑎̀ 𝑚𝑎̣𝑛𝑔       :        {get_carrier(so_dien_thoai)}\n"
         f"🪩 𝑉𝑖̣ 𝑡𝑟𝑖́                :        𝑉/𝑁 𝑂𝑛𝑙𝑖𝑛𝑒\n\n"
         f"🚀 𝐿𝑒̣̂𝑛ℎ ✧𝐅𝐫𝐞𝐞✧ 𝑑𝑎̃ 𝑐ℎ𝑎̣𝑦 𝑡ℎ𝑎̀𝑛ℎ 𝑐𝑜̂𝑛𝑔 \n"
-        f" 𝐺𝑖𝑎̉𝑚 𝑡ℎ𝑜̛̀𝑖 𝑔𝑖𝑎𝑛 𝑥𝑢𝑜̂́𝑛𝑔 𝑐𝑜̀𝑛 𝟻𝟶𝑠 !🎯\n"
+        f" 𝐺𝑖𝑎̉𝑚 𝑡ℎ𝑜̛̀𝑖 𝑔𝑖𝑎𝑛 𝑥𝑢𝑜̂́𝑛𝑔 𝑐𝑜̀𝑛 𝟻𝟎𝑠 !🎯\n"
     )
     await gui_phan_hoi(
         message,
@@ -1962,7 +2041,7 @@ async def xu_ly_full(message: Message):
     if not cac_tham_so:
         await gui_phan_hoi(
             message,
-            "🫡 ℂ𝕦́ 𝕡𝕙𝕒́𝕡: /𝕗𝕦𝕝𝕝 0909778998....\nℂ𝕙𝕒̣𝕪 𝕝𝕚𝕖̂𝑛 𝕥𝕦̣c 24𝕙 - 𝕍𝕀ℙ 𝕔𝕙𝕚̉ 1 𝕤𝕠̂́ 𝕞𝕠̂̃𝕚 𝕝𝕒̂̀𝕟 !",
+            "🫡 ℂ𝕦́ 𝕡𝕙𝕒́𝕡: /𝕗𝕦𝕝𝕝 0909778998....\nℂ𝕙𝕒̣𝕪 𝕝𝕚𝕖̂𝑛 𝕥𝕦̣𝕔 24𝕙 - 𝕍𝕀ℙ ",
             xoa_tin_nguoi_dung=True,
             tu_dong_xoa_sau_giay=False,
         )
@@ -2298,7 +2377,7 @@ async def xu_ly_checkid(message: Message):
                     or chat_info.first_name
                     or f"User {target_user_id}"
                 )
-            except:
+            except Exception:
                 target_user_name = f"User {target_user_id}"
         except ValueError:
             pass
@@ -2338,7 +2417,7 @@ async def xu_ly_checkid(message: Message):
                     expiry_info += f"📅 𝐻𝑒̂́𝑡 ℎ𝑎̣𝑛          :       {expiry_date.strftime('%d/%m/%Y %H:%M')}\n\n"
                 else:
                     expiry_info = "\n⚠️ 𝑉𝐼𝑃 đ𝑎̃ ℎ𝑒̂́𝑡 ℎ𝑎̣𝑛!\n\n"
-        except:
+        except Exception:
             pass
     elif cap_do == "super_vip":
         try:
@@ -2363,7 +2442,7 @@ async def xu_ly_checkid(message: Message):
                     expiry_info += f"📅 𝐻𝑒̂́𝑡 ℎ𝑎̣𝑛          :       {expiry_date.strftime('%d/%m/%Y %H:%M')}\n\n"
                 else:
                     expiry_info = "\n⚠️ 𝑆𝑈𝑃𝐸𝑅 𝑉𝐼𝑃 đ𝑎̃ ℎ𝑒̂́𝑡 ℎ𝑎̣𝑛!\n\n"
-        except:
+        except Exception:
             pass
     elif cap_do == "admin":
         expiry_info = " 𝑇𝑢̛̣ 𝐻𝑜𝑎̀𝑛 𝑇ℎ𝑖𝑒̣̂𝑛 ! "
@@ -2383,7 +2462,7 @@ async def xu_ly_checkid(message: Message):
     elif cap_do == "vip":
         noi_dung += "\n🎯 𝑆𝑢̛̉ 𝑑𝑢̣𝑛𝑔 đ𝑎̂̀𝑦 đ𝑢̉ 𝑐𝑎́𝑐 𝑙𝑒̣̂𝑛ℎ 𝑉𝐼𝑃!"
     elif cap_do == "super_vip":
-        noi_dung += "\n🏆 𝑆𝑢̛̉ 𝑑𝑢̣𝑛𝑔 𝑡𝑎̂́𝑡 𝑐𝑎̉ 𝑘ℎ𝑜̂𝑛𝑔 𝑔𝑖𝑜̛́𝑖 ℎ𝑎̣𝑛 𝑆𝑈𝑃𝐸𝑅 𝑉𝐼𝑃!"
+        noi_dung += "\n🏆 𝑆𝑢̛̉ 𝑑𝑢𝑛𝑔 𝑡𝑎̂́𝑡 𝑐𝑎̉ 𝑘ℎ𝑜̂𝑛𝑔 𝑔𝑖𝑜̛́𝑖 ℎ𝑎̣𝑛 𝑆𝑈𝑃𝐸𝑅 𝑉𝐼𝑃!"
     elif cap_do == "admin":
         noi_dung += "\n🎯 𝑇𝑜𝑎̀𝑛 𝑞𝑢𝑦𝑒̂̀𝑛 𝑞𝑢𝑎̉𝑛 𝑡𝑟𝑖̣ ℎ𝑒̣̂ 𝑡ℎ𝑜̂́𝑛𝑔!"
     await gui_phan_hoi(
@@ -2571,7 +2650,7 @@ async def xu_ly_them_super_vip(message: Message):
     if len(cac_tham_so) >= 2:
         try:
             so_ngay = int(cac_tham_so[1].strip())
-        except:
+        except Exception:
             pass
     ten_muc_tieu = (
         " ".join(cac_tham_so[2:])
@@ -2645,8 +2724,8 @@ async def xu_ly_xoa_super_vip(message: Message):
             lien_ket_admin = dinh_dang_lien_ket_nguoi_dung(user)
             noi_dung = (
                 f"🗑️ 𝐷𝑎̃ 𝑥𝑜́𝑎 𝑆𝑈𝑃𝐸𝑅 𝑉𝐼𝑃 !\n\n"
-                f"👤 𝑁𝑔𝑢̛𝑜̛̀𝑖 𝑏𝑖̣ 𝑥𝑜́𝑎     :       {lien_ket_vip_xoa}\n"
-                f"🆔 𝑈𝑠𝑒𝑟 𝐼𝐷          :        {id_muc_tieu}\n\n"
+                f"👤 𝑁𝑔𝑢̛𝑜̛̀𝑖 𝑏𝑖̣ 𝑥𝑜́𝑎      :       {lien_ket_vip_xoa}\n"
+                f"🆔 𝑈𝑠𝑒𝑟 𝐼𝐷          :        {id_muc_tieu}\n"
                 f"🥷🏿 𝑋𝑜́𝑎 𝑏𝑜̛̉𝑖          :         {lien_ket_admin}"
             ) 
         else:
@@ -2764,7 +2843,7 @@ async def xu_ly_cleanup(message: Message):
     )
     try:
         await bot.delete_message(chat_id=message.chat.id, message_id=message.message_id)
-    except:
+    except Exception:
         pass
     cleanup_stats = {
         "processes_killed": 0,
@@ -2795,9 +2874,9 @@ async def xu_ly_cleanup(message: Message):
                         proc.kill()
                         proc.wait(timeout=2)
                         cleanup_stats["processes_killed"] += 1
-                    except:
+                    except Exception:
                         pass
-            except:
+            except Exception:
                 continue
         with PROCESS_LOCK:
             USER_PROCESSES.clear()
@@ -2814,7 +2893,7 @@ async def xu_ly_cleanup(message: Message):
                             os.remove(file_path)
                             cleanup_stats["log_files_deleted"] += 1
                             cleanup_stats["space_freed"] += file_size
-                    except:
+                    except Exception:
                         pass
         cache_dirs = ["/root/.cache", "/tmp", "/var/tmp"]
         for cache_dir in cache_dirs:
@@ -2835,7 +2914,7 @@ async def xu_ly_cleanup(message: Message):
                                     os.remove(file_path)
                                     cleanup_stats["cache_cleared"] += 1
                                     cleanup_stats["space_freed"] += file_size
-                            except:
+                            except Exception:
                                 pass
                         for dir_name in dirs[:]:
                             if dir_name == "__pycache__":
@@ -2843,9 +2922,9 @@ async def xu_ly_cleanup(message: Message):
                                     dir_path = os.path.join(root, dir_name)
                                     if not os.listdir(dir_path):
                                         os.rmdir(dir_path)
-                                except:
+                                except Exception:
                                     pass
-                except:
+                except Exception:
                     pass
         if os.path.exists(BASE_DIR):
             for file in os.listdir(BASE_DIR):
@@ -2861,7 +2940,7 @@ async def xu_ly_cleanup(message: Message):
                             os.remove(file_path)
                             cleanup_stats["temp_files_deleted"] += 1
                             cleanup_stats["space_freed"] += file_size
-                    except:
+                    except Exception:
                         pass
         try:
             conn = tao_ket_noi_db()
@@ -2870,7 +2949,7 @@ async def xu_ly_cleanup(message: Message):
             cursor.execute("REINDEX")
             conn.commit()
             conn.close()
-        except:
+        except Exception:
             pass
         quyen_cache.cache.clear()
         quyen_cache.timestamps.clear()
@@ -2880,7 +2959,7 @@ async def xu_ly_cleanup(message: Message):
         # Thông báo kết quả
         noi_dung = f"""🧹 𝐷𝑜̣𝑛 𝑑𝑒̣̃𝑝 𝑉𝑃𝑆 ℎ𝑜𝑎̀𝑛 𝑡𝑎̂́𝑡 !
 • 🥷🏿 𝑇ℎ𝑢̛̣𝑐 ℎ𝑖𝑒̣̂𝑛 𝑏𝑜̛̉𝑖 : {lien_ket_admin}
-• 🚀 𝑉𝑃𝑆 𝑑𝑎̃ 𝑑𝑢̛𝑜̛̣𝑐 𝑡𝑜̂́𝑖 𝑢̛u ℎ𝑜́𝑎 !"""
+• 🚀 𝑉𝑃𝑆 𝑑𝑎̃ 𝑑𝑢̛𝑜̛̣𝑐 𝑡𝑜̂́𝑖 𝑢𝑢 ℎ𝑜́𝑎 !"""
         # Cập nhật thông báo
         await bot.edit_message_text(
             chat_id=thong_bao.chat.id,
@@ -2900,7 +2979,7 @@ async def xu_ly_cleanup(message: Message):
                 text=f"<blockquote>❌ 𝐿𝑜̂̃𝑖 𝑘ℎ𝑖 𝑑𝑜𝑛 𝑑𝑒̣̃𝑝: {str(e)}</blockquote>",
                 parse_mode=ParseMode.HTML,
             )
-        except:
+        except Exception:
             pass
         return False
 @chi_nhom
@@ -2947,7 +3026,7 @@ async def xu_ly_xem_danh_sach_vip(message: Message):
                                 expiry_str = f" ({hours_left} giờ)"
                         else:
                             expiry_str = " (Hết hạn)"
-                    except:
+                    except Exception:
                         expiry_str = " (Lỗi date)"
                 noi_dung += (
                     f"  🏆 {lien_ket_nguoi_dung}{expiry_str}\n     🆔 {user_id}\n\n"
@@ -2975,7 +3054,7 @@ async def xu_ly_xem_danh_sach_vip(message: Message):
                                 expiry_str = f" ({hours_left} giờ)"
                         else:
                             expiry_str = " (Hết hạn)"
-                    except:
+                    except Exception:
                         expiry_str = " (Lỗi date)"
                 noi_dung += (
                     f"  🧞‍♂️ {lien_ket_nguoi_dung}{expiry_str}\n     🆔 {user_id}\n\n"
@@ -3003,7 +3082,7 @@ async def xu_ly_xem_danh_sach_vip(message: Message):
                                 expiry_str = f" ({hours_left} giờ)"
                         else:
                             expiry_str = " (Hết hạn)"
-                    except:
+                    except Exception:
                         expiry_str = " (Lỗi date)"
                 noi_dung += (
                     f"  🧞‍♂️ {lien_ket_nguoi_dung}{expiry_str}\n     🆔 {user_id}\n\n"
@@ -3031,7 +3110,7 @@ async def xu_ly_xem_danh_sach_vip(message: Message):
                                 expiry_str = f" ({hours_left} giờ)"
                         else:
                             expiry_str = " (Hết hạn)"
-                    except:
+                    except Exception:
                         expiry_str = " (Lỗi date)"
                 noi_dung += (
                     f"  🧞‍♂️ {lien_ket_nguoi_dung}{expiry_str}\n     🆔 {user_id}\n\n"
@@ -3062,7 +3141,7 @@ async def xu_ly_tin_nhan_khong_phai_lenh(message: Message):
             await bot.delete_message(
                 chat_id=message.chat.id, message_id=message.message_id
             )
-        except:
+        except Exception:
             pass
         if message.text.startswith("/"):
             cac_lenh_hop_le = [
@@ -3104,7 +3183,7 @@ async def xu_ly_tin_nhan_khong_phai_lenh(message: Message):
                     asyncio.create_task(
                         tu_dong_xoa_tin_nhan(phan_hoi.chat.id, phan_hoi.message_id, 5)
                     )
-                except:
+                except Exception:
                     pass
     except Exception as e:
         logger.error(f"Lỗi xu_ly_tin_nhan_khong_phai_lenh: {e}")
@@ -3177,11 +3256,11 @@ async def xu_ly_start_rieng(message: Message):
                                         chat_id=int(referrer_id),
                                         text=f"<blockquote>🎉 𝐶ℎ𝑢́𝑐 𝑚𝑢̛̀𝑛𝑔 𝑏𝑎̣𝑛 𝑑𝑎̃ 𝑙𝑒̂𝑛 𝑉𝐼𝑃 !\n\n"
                                         f"𝐵𝑎̣𝑛 𝑑𝑎̃ 𝑚𝑜̛̀𝑖 𝑑𝑢̉ {count} 𝑛𝑔𝑢̛𝑜̛̀𝑖 𝑡ℎ𝑎𝑚 𝑔𝑖𝑎 𝑛ℎ𝑜́𝑚\n"
-                                        f"𝑇𝑢̛̣ 𝑑𝑜̣𝑛𝑔 𝑙𝑒̂𝑛 𝑉𝐼𝑃 30 𝑛𝑔𝑎̀𝑦\n"
+                                        f"𝑇𝑢̛̣ 𝑑𝑜̣̂𝑛𝑔 𝑙𝑒̂𝑛 𝑉𝐼𝑃 30 𝑛𝑔𝑎̀𝑦\n"
                                         f"𝐻𝑒̂́𝑡 ℎ𝑎̣𝑛  :  {(datetime.now() + timedelta(days=30)).strftime('%d/%m/%Y')}</blockquote>",
                                         parse_mode=ParseMode.HTML,
                                     )
-                                except:
+                                except Exception:
                                     pass
                     conn.close()
                     await bot.send_message(
@@ -3262,8 +3341,10 @@ async def main():
         scheduler.add_job(
             xu_ly_oki_cleanup_6h, "cron", hour=6, minute=0, id="oki_cleanup_6h"
         )
+        async def _cleanup_wrapper():
+            await asyncio.to_thread(cleanup_dead_processes)
         scheduler.add_job(
-            cleanup_dead_processes, "cron", hour=6, minute=5, id="general_cleanup"
+            _cleanup_wrapper, "cron", hour=6, minute=5, id="general_cleanup"
         )
         scheduler.start()
         cleanup_task = asyncio.create_task(schedule_cleanup())
